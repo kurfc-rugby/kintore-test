@@ -25,7 +25,7 @@ function create(opts) {
   class Range {
     constructor(sh, r, c, nr, nc) { this.sh = sh; this.r = r; this.c = c; this.nr = nr; this.nc = nc; }
     getValues() {
-      stats.reads++;
+      stats.reads++; this.sh.reads = (this.sh.reads || 0) + 1;
       const out = [];
       for (let i = 0; i < this.nr; i++) {
         const row = this.sh.data[this.r - 1 + i] || [];
@@ -100,7 +100,19 @@ function create(opts) {
   // ---------- サービス ----------
   function propStore() {
     const props = {};
-    return { getProperty: (k) => (k in props ? props[k] : null), setProperty: (k, v) => { props[k] = String(v); }, deleteProperty: (k) => { delete props[k]; }, _all: props };
+    // 本物と同じく、値は9KBまで・全部で500KBまで（テストでは _quota で小さくできる）
+    const size = (o) => Object.keys(o).reduce((n, k) => n + k.length + String(o[k]).length, 0);
+    const fits = (next) => { if (size(next) > (api._quota || 500 * 1024)) throw new Error('Exceeded maximum stored data'); };
+    const api = { getProperty: (k) => (k in props ? props[k] : null),
+      setProperty: (k, v) => { if (String(v).length > 9000) throw new Error('プロパティの値が大きすぎます'); fits(Object.assign({}, props, { [k]: String(v) })); props[k] = String(v); },
+      deleteProperty: (k) => { delete props[k]; }, getProperties: () => Object.assign({}, props),
+      setProperties: (o, del) => {
+        Object.keys(o).forEach((k) => { if (String(o[k]).length > 9000) throw new Error('プロパティの値が大きすぎます'); });
+        fits(Object.assign(del ? {} : Object.assign({}, props), o));
+        if (del) Object.keys(props).forEach((k) => delete props[k]);
+        Object.keys(o).forEach((k) => { props[k] = String(o[k]); });
+      }, _all: props, _size: () => size(props) };
+    return api;
   }
   function cacheStore() {
     const c = {};
@@ -194,7 +206,7 @@ function create(opts) {
   if (opts.withLibrary !== false) sandbox.KurfcRoster = KurfcRoster;
   vm.createContext(sandbox);
   const code = fs.readFileSync(path.join(__dirname, '..', 'gas', 'Code.gs'), 'utf8');
-  vm.runInContext(code + '\n;this.__fn = {handle_, setup, registerAdmin_, doPost, doGet, onOpen, menuRegisterAdmin, pinHash_, today_, pushHourly, setupPush, ecSign_, utf8_, pruneStamps_: function (d) { REQ_ = { tables: {}, ss: null, roster: null }; try { pruneStamps_(d); } finally { REQ_ = null; } }, menuBackupNow, menuRestoreBackup, withReq: function (f) { REQ_ = { tables: {}, ss: null, roster: null }; try { return f({ setupTestEnv, purgeClips_, expireClips_, clipCode_, backupNow_, restoreBackup_, archiveLogs_, weeklyBackup_, backupBook_, readBackupTab_, goalHist_, weekGoalAt_ }); } finally { REQ_ = null; } }};', sandbox, { filename: 'Code.gs' });
+  vm.runInContext(code + '\n;this.__fn = {handle_, setup, registerAdmin_, doPost, doGet, onOpen, menuRegisterAdmin, pinHash_, today_, pushHourly, setupPush, ecSign_, utf8_, pruneStamps_: function (d) { REQ_ = { tables: {}, ss: null, roster: null }; try { pruneStamps_(d); } finally { REQ_ = null; } }, menuBackupNow, menuRestoreBackup, withReq: function (f) { REQ_ = { tables: {}, ss: null, roster: null }; try { return f({ setupTestEnv, purgeClips_, expireClips_, attachPendingMaybe_, clipCode_, backupNow_, restoreBackup_, archiveLogs_, weeklyBackup_, backupBook_, readBackupTab_, goalHist_, weekGoalAt_ }); } finally { REQ_ = null; } }};', sandbox, { filename: 'Code.gs' });
   const fn = sandbox.__fn;
 
   const api = {

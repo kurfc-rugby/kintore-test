@@ -104,6 +104,13 @@ const G = api({ op: 'login', memberId: gid, pin: 'guest-pin-1' }).token;
 st = api({ op: 'state', token: G });
 ok(st.me && st.me.perm === 'guest' && st.members && st.records, '見るだけの人も全部見られる');
 ok(api({ op: 'clipFlag', token: G, id: 'x', on: true }).error === 'forbidden', '見るだけの人は「気になる」を押せない');
+{ // 応援の「送った人」は、ログインした本人だけ（端末に残っていた名前や、ほかの人の名前を名乗れない）
+  const tg = id['森 健太'], ev = 'g:2026-11-02';
+  let rs = api({ op: 'stamp', token: G, target: tg, event: ev, kind: 'clap', device: 'a0a0a0a0a0a0a0a0', from: id['石川 大地'] });
+  ok(rs.ok && !(rs.stamp.f || []).some((x) => x === id['石川 大地'] || (x && x.id === id['石川 大地'])), '見るだけの人の応援は、名前なし（選手の名前を名乗れない）');
+  rs = api({ op: 'stamp', token: MG, target: tg, event: ev, kind: 'fire', device: 'b1b1b1b1b1b1b1b1', from: id['石川 大地'] });
+  ok(rs.ok && JSON.stringify(rs.stamp.f || []).indexOf(id['マネ 花子']) >= 0 && JSON.stringify(rs.stamp.f || []).indexOf(id['石川 大地']) < 0, 'ログインした人の応援は、その人の名前（ほかの人を名乗れない）');
+}
 
 section('動画を出す → 自動で「実施した」');
 const today = gas.run('today_');
@@ -134,9 +141,16 @@ r = api({ op: 'clipVideo', token: G, id: clip1 });
 ok(r.ok && r.mime === 'video/mp4' && r.data === vid, '動画を見られる（見るだけの人も）');
 
 section('気になる → スタッフの確認');
+const MEP = 'https://fcm.googleapis.com/fcm/send/manager-device:APA91b-test', PEP = 'https://fcm.googleapis.com/fcm/send/player-device:APA91b-test';
+r = api({ op: 'pushRegister', token: MG, sub: { endpoint: MEP }, memberId: '', kinds: ['clipq', 'goal'] });
+ok(r.ok && r.push.kinds.join() === 'clipq', 'マネージャーは「動画の確認」の通知を受け取れる（選手でないので「今週あと○回」は無し）');
+r = api({ op: 'pushRegister', token: ISHI, sub: { endpoint: PEP }, memberId: id['石川 大地'], kinds: ['clipq', 'goal'] });
+ok(r.ok && r.push.kinds.join() === 'goal', '選手は「動画の確認」を受け取れない');
 ok(api({ op: 'clipFlag', token: MORI2, id: clip1, on: true }).error === 'own', '自分の動画には押せない');
+gas.push.sent.length = 0;
 r = api({ op: 'clipFlag', token: ISHI, id: clip1, on: true });
 ok(r.ok && r.clip.mine, '部員が「気になる」を押せる');
+ok(gas.push.sent.length === 1 && gas.push.sent[0].url === MEP && /気になる/.test(api({ op: 'pushInbox', endpoint: MEP }).messages[0].title), '「気になる」がつくと、マネージャー（動画の確認をオン）に通知が届く');
 st = api({ op: 'state', token: MG });
 ok(st.clipQueue === 1 && st.clips.find((c) => c.id === clip1).nf === 1, 'スタッフには確認が要る数と「気になる」の数が出る');
 ok(api({ op: 'clips', token: MG, queue: true }).clips.length === 1, '確認待ちの一覧');
@@ -149,19 +163,54 @@ ok(api({ op: 'state', token: MORI2 }).clips.find((c) => c.id === clip1).why === 
 
 section('取り消された日に撮り直すと確認待ち');
 const at2 = jst(2);
+gas.push.sent.length = 0;
 r = api({ op: 'clipUpload', token: MORI2, mime: 'video/mp4', data: vid, thumb, recordedAt: at2, code });
 ok(r.ok && r.pending && r.clip.st === 'pending' && !r.records.some((x) => x[0] === id['森 健太']), '撮り直しは確認待ち（まだ「実施した」にならない）');
+ok(gas.push.sent.length === 1 && gas.push.sent[0].url === MEP && /確認待ち/.test(api({ op: 'pushInbox', endpoint: MEP }).messages[0].title), '確認待ちの動画が届くと、スタッフに通知が届く');
 ok(api({ op: 'state', token: MG }).clipQueue === 1, 'スタッフの確認待ちに出る');
 r = api({ op: 'clipApprove', token: MG, id: r.clip.id });
 ok(r.ok && r.recorded && r.records.some((x) => x[0] === id['森 健太'] && x[2] === 1), 'スタッフが確認すると「実施した」になる');
 ok(api({ op: 'state', token: MG }).clipQueue === 0, '確認待ちがなくなる');
+ok(api({ op: 'saveRecords', token: A, date: r.clip.d, items: [{ memberId: id['森 健太'], done: false }] }).rejected[0].reason === 'from_video', '確認してついた「実施した」も動画の記録（記録の画面では外れない）');
+
+section('動画でついた「実施した」は、記録の画面から外さない（動画を取り消して外す）');
+{
+  const IS = id['石川 大地'];
+  const st0 = api({ op: 'state', token: MG });
+  const cl = st0.clips.find((c) => c.st === 'ok' && !c.gone && st0.records.some((x) => x[0] === c.m && x[1] === c.d && x[2] === 1));
+  const vd = cl && st0.records.find((x) => x[0] === cl.m && x[1] === cl.d);
+  ok(!!vd, '動画でついた「実施した」がある（動画が取り消されていない・消えていない）');
+  if (vd) {
+    const VM = vd[0];
+    let r = api({ op: 'saveRecords', token: MG, date: vd[1], items: [{ memberId: VM, done: false }] });
+    ok(r.ok && r.rejected.length === 1 && r.rejected[0].reason === 'from_video', 'マネージャーが記録の画面で外そうとしても、外れない（動画から取り消すよう案内）');
+    r = api({ op: 'saveRecords', token: A, date: vd[1], items: [{ memberId: VM, done: false }] });
+    ok(r.ok && r.rejected.length === 1 && r.rejected[0].reason === 'from_video', '管理者でも記録の画面からは外れない');
+    ok(api({ op: 'deleteRecord', token: A, date: vd[1], memberId: VM }).error === 'from_video', '管理者の「取り消す」（記録の削除）でも外れない');
+    ok(api({ op: 'state', token: MG }).records.some((x) => x[0] === VM && x[1] === vd[1] && x[2] === 1), '「実施した」はそのまま');
+  }
+  // 動画のない日の記録は、これまでどおり記録の画面で外せる
+  const MO = id['森 健太'], dx = st0.clips.filter((c) => c.m === MO).map((c) => c.d);
+  const free = [3, 4, 5, 6].map((k) => jst(k * 1440).slice(0, 10)).find((d) => dx.indexOf(d) < 0);
+  r = api({ op: 'saveRecords', token: MG, date: free, items: [{ memberId: MO, done: true }] });
+  ok(r.ok && r.saved === 1, '動画を送れなかった日は、マネージャーが「実施した」をつけられる');
+  r = api({ op: 'saveRecords', token: MG, date: free, items: [{ memberId: MO, done: false }] });
+  ok(r.ok && r.removed === 1 && !r.rejected.length, 'その記録（動画なし）は、記録の画面で外せる');
+  ok(api({ op: 'resetPin', token: A, id: IS }).message.indexOf('登録を消す') >= 0, '選手の暗証番号の発行は、「登録を消す」を案内する');
+}
 
 section('2段階：先に「実施した」、動画はあとから');
 const at3 = jst(1);
 const IS = id['石川 大地'];
 r = api({ op: 'clipStart', token: ISHI, mime: 'video/mp4', thumb, recordedAt: at3, code });
-ok(r.ok && r.clip.nv === 1 && r.records.some((x) => x[0] === IS && x[1] === today && x[2] === 1), 'まず小さいデータ（時刻・今日の数字・サムネイル）だけで「実施した」になる');
+ok(r.ok && r.queued && r.recorded && r.clip.nv === 1 && r.clip.st === 'ok', 'まず小さいデータ（時刻・今日の数字・サムネイル）だけで「実施した」と返事（すぐ）');
 const c3 = r.clip.id;
+ok(!gas.sheet('動画').data.some((row) => row.indexOf(at3) >= 0) && Object.keys(gas.props._all).some((k) => k === 'CS:' + IS + '|' + at3), '「送る」はメモに書くだけ（シートの書き込みと順番待ちをしない）');
+ok(api({ op: 'clipStart', token: ISHI, mime: 'video/mp4', thumb, recordedAt: at3, code }).clip.id === c3, 'シートに書く前に送り直しても、同じ動画のまま');
+st = api({ op: 'state', token: MORI2 });
+ok(st.records.some((x) => x[0] === IS && x[1] === today && x[2] === 1) && st.clips.some((c) => c.id === c3), '次にだれかが使うと、先にシートに書く（ほかの人にも「実施した」と動画が見える）');
+ok(!Object.keys(gas.props._all).some((k) => k.indexOf('CS:') === 0 || k.indexOf('CT:') === 0), 'シートに書いたらメモは消える');
+{ const sh = gas.sheet('動画のサムネイル'); ok(sh.data.some((row) => row[0] === c3 && row[1] === thumb), 'サムネイルもシートに書かれる（メモに分けて置いておいた分）'); }
 ok(api({ op: 'clipStart', token: ISHI, mime: 'video/mp4', thumb, recordedAt: at3, code }).again, '送り直しても二重にならない');
 ok(api({ op: 'clipStart', token: ISHI, mime: 'video/mp4', thumb, recordedAt: at3, code: code + 1 }).error === 'bad_code', '先に送るときも今日の数字を確かめる');
 ok(api({ op: 'clipVideo', token: G, id: c3 }).error === 'not_yet', '動画が届くまでは「まだ届いていません」');
@@ -172,12 +221,45 @@ ok(r.ok && r.attached && r.clip.id === c3 && r.clip.nv === 0 && Object.keys(gas.
 ok(api({ op: 'clipVideo', token: G, id: c3 }).data === vid, '届いたら見られる');
 ok(api({ op: 'clipUpload', token: ISHI, mime: 'video/mp4', data: vid, thumb, recordedAt: at3, code }).again && Object.keys(gas.drive.files).length === nfiles + 1, '動画を送り直しても二重にならない');
 
+{ // 大きなサムネイル（9KBを超える）も、分けて置いておける
+  const big = 'A'.repeat(30000), atb = jst(0.7);
+  const rb = api({ op: 'clipStart', token: ISHI, mime: 'video/mp4', thumb: big, recordedAt: atb, code });
+  api({ op: 'state', token: ISHI });
+  ok(rb.ok && gas.sheet('動画のサムネイル').data.some((row) => row[0] === rb.clip.id && row[1] === big), '大きなサムネイル（30KB）も分けて置いて、そのままシートに書く');
+  api({ op: 'clipUpload', token: ISHI, mime: 'video/mp4', data: vid, thumb: big, recordedAt: atb, code });
+}
+
+{ // メモがいっぱい（スクリプトのプロパティは全部で500KBまで。一斉に送られたとき）でも送れる：その1本はシートに直接書く
+  api({ op: 'state', token: ISHI });
+  const atf = jst(0.9), big = 'B'.repeat(20000);
+  gas.props._quota = gas.props._size() + 4000;
+  const rf = api({ op: 'clipStart', token: ISHI, mime: 'video/mp4', thumb: big, recordedAt: atf, code });
+  gas.props._quota = 0;
+  ok(rf.ok && rf.recorded && rf.clip && rf.clip.nv === 1 && gas.sheet('動画').data.some((row) => row.indexOf(atf) >= 0) && gas.sheet('動画のサムネイル').data.some((row) => row[0] === rf.clip.id && row[1] === big), 'メモがいっぱいでも「送る」は通る（その1本はシートに直接書く）');
+  ok(!Object.keys(gas.props._all).some((k) => k.indexOf(IS + '|' + atf) >= 0), '途中まで書けたメモは残らない');
+  const ru = api({ op: 'clipUpload', token: ISHI, mime: 'video/mp4', data: vid, thumb, recordedAt: atf, code });
+  ok(ru.ok && ru.clip.id === rf.clip.id && ru.clip.nv === 0, 'あとから送った動画も、その行につく');
+}
+
+{ // 速さのため：下書きも「送る」も、動画のシート（一覧）を読まない
+  api({ op: 'state', token: ISHI });
+  const sh = gas.sheet('動画'), r0 = sh.reads || 0, atq = jst(0.65);
+  const a1 = api({ op: 'clipDraft', token: ISHI, mime: 'video/mp4', data: vid, thumb, recordedAt: atq, code });
+  const a2 = api({ op: 'clipStart', token: ISHI, mime: 'video/mp4', thumb, recordedAt: atq, code });
+  ok(a1.saved && a2.queued && a2.clip.nv === 0 && (sh.reads || 0) === r0, '下書きも「送る」も、動画のシートを読まない（小さな索引を見る）');
+  ok(api({ op: 'clipDraft', token: ISHI, mime: 'video/mp4', data: vid, thumb, recordedAt: atq, code }).again, '索引で、送り直しの下書きも二重にならない');
+  api({ op: 'state', token: ISHI });
+  ok(api({ op: 'clipDraft', token: ISHI, mime: 'video/mp4', data: vid, thumb, recordedAt: atq, code }).again && api({ op: 'clipStart', token: ISHI, mime: 'video/mp4', thumb, recordedAt: atq, code }).again, 'シートに書いたあとも（索引が作り直されて）二重にならない');
+}
+
 section('下書き：撮ってすぐ送っておく（「送る」の前）');
 const MO = id['森 健太'];
 const nf0 = Object.keys(gas.drive.files).length;
 const at5 = jst(0.5);
 r = api({ op: 'clipDraft', token: MORI2, mime: 'video/mp4', data: vid, thumb, recordedAt: at5, code });
-ok(r.ok && r.draft && Object.keys(gas.drive.files).length === nf0 + 1, '下書きは動画をドライブに置く');
+ok(r.ok && r.saved && Object.keys(gas.drive.files).length === nf0 + 1, '下書きは動画をドライブに置いて、すぐ返事（シートには書かない＝順番待ちしない）');
+const pendKeys = () => Object.keys(gas.props._all).filter((k) => k.indexOf('CP:') === 0);
+ok(pendKeys().length === 1 && !gas.sheet('動画').data.some((row) => row.indexOf(at5) >= 0), '下書きの動画の場所はメモ（プロパティ）に書き、行はまだ作らない');
 ok(!api({ op: 'state', token: ISHI }).clips.some((c) => c.at === at5) && !api({ op: 'state', token: MORI2 }).clips.some((c) => c.at === at5), '下書きはだれにも（本人にも）見えない');
 ok(!api({ op: 'clips', token: MG }).clips.some((c) => c.at === at5), '下書きは一覧にも出ない');
 ok(api({ op: 'clipDraft', token: MORI2, mime: 'video/mp4', data: vid, thumb, recordedAt: at5, code }).again && Object.keys(gas.drive.files).length === nf0 + 1, '下書きを送り直しても二重にならない');
@@ -187,21 +269,28 @@ ok(api({ op: 'state', token: ISHI }).clips.some((c) => c.at === at5), '出した
 ok(api({ op: 'clipUpload', token: MORI2, mime: 'video/mp4', data: vid, thumb, recordedAt: at5, code }).again, '出したあと動画を送っても二重にならない');
 const at6 = jst(0.4);
 api({ op: 'clipDraft', token: MORI2, mime: 'video/mp4', data: vid, thumb, recordedAt: at6, code });
-const thumbsBefore = gas.sheet('動画のサムネイル').data.length;
+const trashed0 = Object.values(gas.drive.files).filter((f) => f.trashed).length;
 r = api({ op: 'clipDraftDrop', token: MORI2, recordedAt: at6 });
-ok(r.ok && gas.sheet('動画のサムネイル').data.length === thumbsBefore - 1 && !gas.sheet('動画').data.some((row) => row.indexOf(at6) >= 0), '撮り直すと下書きは消える（行・サムネイル）');
+ok(r.ok && !pendKeys().some((k) => k.indexOf(at6) >= 0) && !gas.sheet('動画').data.some((row) => row.indexOf(at6) >= 0), '撮り直すと下書きは消える（メモも行も残らない）');
+ok(Object.values(gas.drive.files).filter((f) => f.trashed).length === trashed0 + 1, '撮り直した下書きの動画はドライブのゴミ箱へ');
 ok(Object.values(gas.drive.files).filter((f) => f.trashed).length >= 1, '下書きの動画はドライブのゴミ箱へ');
 ok(api({ op: 'clipDraftDrop', token: MORI2, recordedAt: at5 }).none, '出したものは「下書きを消す」で消えない');
 const at7 = jst(0.3);
 r = api({ op: 'clipStart', token: MORI2, mime: 'video/mp4', thumb, recordedAt: at7, code });
 ok(r.ok && r.clip.nv === 1, '「送る」が下書きより先に着くと動画待ち');
 r = api({ op: 'clipDraft', token: MORI2, mime: 'video/mp4', data: vid, thumb, recordedAt: at7, code });
-ok(r.ok && r.attached && r.clip.nv === 0, 'あとから着いた下書きの動画が、その行につく');
+ok(r.ok && r.saved, 'あとから着いた下書きも、すぐ返事（「送る」の書き込みを待たない）');
+ok(api({ op: 'state', token: ISHI }).clips.find((c) => c.at === at7).nv === 0, 'シートの行につく前から、一覧では「動画あり」');
+ok(api({ op: 'clipVideo', token: ISHI, id: api({ op: 'state', token: ISHI }).clips.find((c) => c.at === at7).id }).data === vid, 'シートの行につく前から、再生できる（メモを見る）');
+gas.cache.remove('k:pend');
+gas.run('withReq', (f) => f.attachPendingMaybe_());
+{ const sh = gas.sheet('動画'), fi = sh.data[0].indexOf('ファイルID'); ok(sh.data.some((row) => row.indexOf(at7) >= 0 && row[fi]) && !pendKeys().some((k) => k.indexOf(at7) >= 0), 'あとでまとめて、シートの行に動画をつける（メモは消える）'); }
 const at8 = jst(0.2);
 api({ op: 'clipDraft', token: MORI2, mime: 'video/mp4', data: vid, thumb, recordedAt: at8, code });
 gas.clock.offset += 61 * 60000;
-gas.run('withReq', (f) => f.expireClips_());
-ok(!gas.sheet('動画').data.some((row) => row.indexOf(at8) >= 0), '1時間たった下書きは消える');
+gas.cache && gas.cache.removeAll && gas.cache.removeAll(['k:pend']);
+gas.run('withReq', (f) => f.attachPendingMaybe_());
+ok(!pendKeys().some((k) => k.indexOf(at8) >= 0) && !gas.sheet('動画').data.some((row) => row.indexOf(at8) >= 0), '出さないまま1時間たった下書きは、動画ごと消える');
 gas.clock.offset -= 61 * 60000;
 
 const at9 = jst(0.1);
@@ -213,6 +302,7 @@ section('「送る」と下書きがほぼ同時に着いて、行が2つにな�
 const atx = jst(0.05);
 r = api({ op: 'clipStart', token: ISHI, mime: 'video/mp4', thumb, recordedAt: atx, code });
 ok(r.ok && r.clip.nv === 1, '「送る」の行（動画待ち）');
+api({ op: 'state', token: ISHI }); // シートに書く
 { // 本番で起きた形をそのまま作る：同じ撮影時刻の下書きの行（動画あり）がもう1つある
   const sh = gas.sheet('動画'), head = sh.data[0], row = head.map(() => '');
   const set = (name, v) => { row[head.indexOf(name)] = v; };
@@ -220,6 +310,7 @@ ok(r.ok && r.clip.nv === 1, '「送る」の行（動画待ち）');
   set('動画ID', 'Cdupdraft0001'); set('部員ID', IS); set('日付', atx.slice(0, 10)); set('撮影日時', atx); set('送信日時', atx); set('ファイルID', fid);
   set('形式', 'video/mp4'); set('大きさ', '100'); set('今日の数字', String(code)); set('状態', '下書き'); set('気になる（部員ID）', '[]');
   sh.data.push(row);
+  gas.cache.remove('k:clipidx'); // シートを直接さわったので、索引を作り直させる（アプリ経由なら自動で作り直す）
 }
 const rowsOf = () => gas.sheet('動画').data.filter((x) => x.indexOf(atx) >= 0 && x.indexOf(IS) >= 0);
 ok(rowsOf().length === 2, '（行が2つある状態）');
@@ -242,8 +333,8 @@ section('動画が24時間届かないと取り消す');
 gas.shiftDays(1);
 const d4 = gas.run('today_'), at4 = jst(1), code4 = gas.run('withReq', (f) => f.clipCode_(d4));
 r = api({ op: 'clipStart', token: ISHI, mime: 'video/mp4', thumb, recordedAt: at4, code: code4 });
-ok(r.ok && r.records.some((x) => x[0] === IS && x[1] === d4 && x[2] === 1), '次の日も先に「実施した」');
 const c4 = r.clip.id;
+ok(r.ok && r.recorded && api({ op: 'state', token: ISHI }).records.some((x) => x[0] === IS && x[1] === d4 && x[2] === 1), '次の日も先に「実施した」');
 ok(gas.run('withReq', (f) => f.expireClips_()) === 0, '24時間たつまでは取り消さない');
 gas.shiftDays(1); gas.clock.offset += 3 * 3600000; // 27時間後
 ok(gas.run('withReq', (f) => f.expireClips_()) === 1, '24時間（＋余裕）たっても動画が届かないと取り消す');
@@ -261,9 +352,46 @@ ok(api({ op: 'clipVideo', token: G, id: clip1 }).error, '消えた動画は見�
 ok(gas.sheet('動画のサムネイル').data.length === 1, 'サムネイルも消える');
 gas.shiftDays(-33);
 
+section('動画が消えたあとは、ふつうの記録にもどる');
+{
+  const st0 = api({ op: 'state', token: MG });
+  const gone = st0.clips.find((c) => c.st === 'ok' && c.gone && st0.records.some((x) => x[0] === c.m && x[1] === c.d && x[2] === 1) && !st0.clips.some((y) => y.m === c.m && y.d === c.d && y.st === 'ok' && !y.gone));
+  ok(!!gone, '消えた動画の日の「実施した」がある');
+  if (gone) ok(api({ op: 'deleteRecord', token: A, date: gone.d, memberId: gone.m }).ok, '動画が消えたあと（1か月たったなど）は、ふつうの記録にもどり、管理者が外せる');
+}
+
 section('テスト環境の守り');
 ok(api({ op: 'saveMember', token: A, member: { id: id['森 健太'], name: '森 健太', grade: '2年' } }).error === 'test_env', 'テスト環境からは会計アプリの名簿を書き換えられない');
 ok(gas.run('withReq', (f) => f.weeklyBackup_()) === null, 'テスト環境ではバックアップを取らない');
+
+section('アイコン（一人一人が決める）');
+{
+  const IS = id['石川 大地'], MOi = id['森 健太'];
+  const jpg = Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF, 0xE0]), Buffer.alloc(600, 7)]).toString('base64');
+  let r = api({ op: 'setIcon', token: ISHI, kind: 'e', emoji: '🔥', color: '#8c1d2f' });
+  ok(r.ok && r.ic === 'e:#8c1d2f:🔥', '絵文字と背景の色でアイコンを決められる');
+  ok(api({ op: 'state', token: MORI2 }).members.find((m) => m.id === IS).ic === 'e:#8c1d2f:🔥', 'ほかの人の画面にもアイコンが出る（部員の一覧に入る）');
+  ok(api({ op: 'setIcon', token: ISHI, kind: 'e', emoji: 'abc', color: '#8c1d2f' }).error === 'bad_icon', '絵文字でない文字はだめ');
+  ok(api({ op: 'setIcon', token: ISHI, kind: 'e', emoji: '<b>', color: '#8c1d2f' }).error === 'bad_icon', 'タグのような文字はだめ');
+  ok(api({ op: 'setIcon', token: ISHI, kind: 'e', emoji: '🔥', color: 'red' }).error === 'bad_icon', '決まった色のほかはだめ');
+  r = api({ op: 'setIcon', token: ISHI, kind: 'p', data: jpg });
+  ok(r.ok && /^p:/.test(r.ic) && r.data === jpg, '写真でもアイコンを決められる');
+  const rows = gas.sheet('アイコン写真').data.filter((row) => row[0] === IS);
+  ok(rows.length === 1, '写真は「アイコン写真」に1人1行');
+  const ic = api({ op: 'icons', token: MORI2, ids: [IS, MOi] });
+  ok(ic.ok && ic.icons[IS] === jpg && !ic.icons[MOi] && ic.vers[IS] === r.ic, 'ほかの人は写真をまとめて取れる（版も一緒に）');
+  r = api({ op: 'setIcon', token: ISHI, kind: 'p', data: jpg });
+  ok(gas.sheet('アイコン写真').data.filter((row) => row[0] === IS).length === 1, '写真を変えても行は増えない');
+  ok(api({ op: 'setIcon', token: ISHI, kind: 'p', data: Buffer.from('not a jpeg, just text that is long enough to pass the size check '.repeat(5)).toString('base64') }).error === 'bad_icon', 'JPEG でないものはだめ');
+  ok(api({ op: 'setIcon', token: ISHI, kind: 'p', data: Buffer.concat([Buffer.from([0xFF, 0xD8]), Buffer.alloc(40 * 1024)]).toString('base64') }).error === 'bad_icon', '大きすぎる写真はだめ');
+  ok(api({ op: 'resetIcon', token: MORI2, memberId: IS }).error === 'forbidden', '選手はほかの人のアイコンを戻せない');
+  r = api({ op: 'resetIcon', token: MG, memberId: IS });
+  ok(r.ok && !api({ op: 'state', token: MORI2 }).members.find((m) => m.id === IS).ic && !gas.sheet('アイコン写真').data.some((row) => row[0] === IS), 'マネージャーはアイコンを元に戻せる（写真も消える）');
+  api({ op: 'setIcon', token: MORI2, kind: 'e', emoji: '💪', color: '#1f3a68' });
+  r = api({ op: 'setIcon', token: MORI2, kind: '' });
+  ok(r.ok && r.ic === '' && !api({ op: 'state', token: ISHI }).members.find((m) => m.id === MOi).ic, '自分でアイコンを外せる');
+  ok(api({ op: 'setIcon', token: G, kind: 'e', emoji: '🔥', color: '#8c1d2f' }).error === 'forbidden', '見るだけの人はアイコンを決めない');
+}
 
 console.log('\n==============================');
 console.log('合格 ' + pass + ' / 不合格 ' + fail);
