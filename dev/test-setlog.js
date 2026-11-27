@@ -1,5 +1,5 @@
 // setlog（v3・テスト環境）の自動テスト：node dev/test-setlog.js
-// 部員全員のログイン・自分で登録・見るだけの人・動画（撮る→自動で実施した→気になる→取り消し→撮り直しは確認待ち→3か月で消える）
+// 部員全員のログイン・自分で登録・見るだけの人・動画（撮る→自動で実施した→審議→取り消し→撮り直しは確認待ち→3か月で消える）
 const { create, seedMaster } = require('./mock-gas');
 const L = require('../logic.js');
 
@@ -21,7 +21,7 @@ const api0 = gas.api;
 let tcChecks = 0;
 const tcBad = [];
 const tcStrip = (s) => JSON.stringify(s, (k, v) => (k === '_t' ? undefined : v));
-const NO_AFTER_T = { ping: 1, state: 1, login: 1, logout: 1, register: 1, viewLogin: 1, changePin: 1, clipStart: 1, clipDraft: 1, clipDraftDrop: 1, clipUpload: 1, clipVideo: 1, clips: 1, icons: 1, logs: 1, sessions: 1, trash: 1, feedbackList: 1, memberHistory: 1, menuArchive: 1, pushInbox: 1, pushMove: 1, clientError: 1 };
+const NO_AFTER_T = { ping: 1, state: 1, login: 1, logout: 1, register: 1, viewLogin: 1, changePin: 1, clipStart: 1, clipDraft: 1, clipDraftDrop: 1, clipUpload: 1, clipVideo: 1, clips: 1, clipThumbs: 1, icons: 1, logs: 1, sessions: 1, trash: 1, feedbackList: 1, memberHistory: 1, menuArchive: 1, pushInbox: 1, pushMove: 1, clientError: 1 };
 let afChecks = 0;
 const afBad = [];
 const api = (req) => {
@@ -159,7 +159,7 @@ ok(api({ op: 'changePin', token: G0, oldPin: gpin, newPin: 'guest-pin-1' }).ok, 
 const G = api({ op: 'login', memberId: gid, pin: 'guest-pin-1' }).token;
 st = api({ op: 'state', token: G });
 ok(st.me && st.me.perm === 'guest' && st.members && st.records, '見るだけの人も全部見られる');
-ok(api({ op: 'clipFlag', token: G, id: 'x', on: true }).error === 'forbidden', '見るだけの人は「気になる」を押せない');
+ok(api({ op: 'clipFlag', token: G, id: 'x', on: true }).error === 'forbidden', '見るだけの人は「審議」を押せない');
 { // 応援の「送った人」は、ログインした本人だけ（端末に残っていた名前や、ほかの人の名前を名乗れない）
   const tg = id['森 健太'], ev = 'g:2026-11-02';
   let rs = api({ op: 'stamp', token: G, target: tg, event: ev, kind: 'clap', device: 'a0a0a0a0a0a0a0a0', from: id['石川 大地'] });
@@ -190,13 +190,20 @@ ok(Object.keys(gas.drive.files).length === 1 && gas.drive.folders[gas.props.getP
 r = api({ op: 'clipUpload', token: MORI2, mime: 'video/mp4', data: vid, thumb, recordedAt: at, code });
 ok(r.ok && r.again && r.clip.id === clip1 && Object.keys(gas.drive.files).length === 1, '同じ動画を送り直しても二重にならない');
 st = api({ op: 'state', token: ISHI });
-ok(st.clips.some((c) => c.id === clip1 && c.m === id['森 健太'] && c.nf === undefined), 'ほかの部員の一覧に出る（「気になる」の数はスタッフだけ）');
+ok(st.clips.some((c) => c.id === clip1 && c.m === id['森 健太'] && c.nf === undefined), 'ほかの部員の一覧に出る（「審議」の数はスタッフだけ）');
 r = api({ op: 'clips', token: ISHI });
 ok(r.ok && r.clips[0].id === clip1 && r.clips[0].th === thumb, '一覧はサムネイルつき');
+{ // 一覧だけすぐ返す（nothumb）。サムネイルは clipThumbs で、見られるものの分だけ
+  const r2 = api({ op: 'clips', token: MG, nothumb: true });
+  ok(r2.ok && r2.clips.length === r.clips.length && r2.clips.every((c) => c.th === undefined), 'nothumb のときは一覧だけ（サムネイルなし）');
+  const t = api({ op: 'clipThumbs', token: MG, ids: [clip1, 'nope'] });
+  ok(t.ok && t.th[clip1] === thumb && t.th.nope === '', 'clipThumbs で、指定した動画のサムネイルだけ取れる（無いものは空）');
+  ok(api({ op: 'clipThumbs', ids: [clip1] }).error, 'ログインしていないと、サムネイルは取れない');
+}
 r = api({ op: 'clipVideo', token: G, id: clip1 });
 ok(r.ok && r.mime === 'video/mp4' && r.data === vid, '動画を見られる（見るだけの人も）');
 
-section('気になる → スタッフの確認');
+section('審議 → スタッフの確認');
 const MEP = 'https://fcm.googleapis.com/fcm/send/manager-device:APA91b-test', PEP = 'https://fcm.googleapis.com/fcm/send/player-device:APA91b-test';
 r = api({ op: 'pushRegister', token: MG, sub: { endpoint: MEP }, memberId: '', kinds: ['clipq', 'goal'] });
 ok(r.ok && r.push.kinds.join() === 'clipq', 'マネージャーは「動画の確認」の通知を受け取れる（選手でないので「今週あと○回」は無し）');
@@ -205,11 +212,12 @@ ok(r.ok && r.push.kinds.join() === 'goal', '選手は「動画の確認」を受
 ok(api({ op: 'clipFlag', token: MORI2, id: clip1, on: true }).error === 'own', '自分の動画には押せない');
 gas.push.sent.length = 0;
 r = api({ op: 'clipFlag', token: ISHI, id: clip1, on: true });
-ok(r.ok && r.clip.mine, '部員が「気になる」を押せる');
-ok(gas.push.sent.length === 1 && gas.push.sent[0].url === MEP && /気になる/.test(api({ op: 'pushInbox', endpoint: MEP }).messages[0].title), '「気になる」がつくと、マネージャー（動画の確認をオン）に通知が届く');
+ok(r.ok && r.clip.mine, '部員が「審議」を押せる');
+ok(gas.push.sent.length === 1 && gas.push.sent[0].url === MEP && /審議/.test(api({ op: 'pushInbox', endpoint: MEP }).messages[0].title), '「審議」がつくと、マネージャー（動画の確認をオン）に通知が届く');
 st = api({ op: 'state', token: MG });
-ok(st.clipQueue === 1 && st.clips.find((c) => c.id === clip1).nf === 1, 'スタッフには確認が要る数と「気になる」の数が出る');
+ok(st.clipQueue === 1 && st.clips.find((c) => c.id === clip1).nf === 1, 'スタッフには確認が要る数と「審議」の数が出る');
 ok(api({ op: 'clips', token: MG, queue: true }).clips.length === 1, '確認待ちの一覧');
+{ const own = api({ op: 'state', token: MORI2 }).clips.find((c) => c.id === clip1); ok(own && own.nf === undefined && !own.mine && !gas.push.sent.some((x) => x.url === PEP), '審議は、動画を出した本人には伝わらない（数も通知も無い）'); }
 ok(api({ op: 'clipCancel', token: ISHI, id: clip1 }).error === 'forbidden', '部員は取り消せない');
 r = api({ op: 'clipCancel', token: MG, id: clip1, reason: 'ジムではない' });
 ok(r.ok && r.removed && !r.records.some((x) => x[0] === id['森 健太']), 'マネージャーが取り消すと、その日の「実施した」が外れる（自分で入れた記録でなくても）');
